@@ -759,6 +759,8 @@ def get_io_reads(bam_reads, pod5_dr, reverse_signal=False, missing_ok=False):
                 reverse_signal=reverse_signal,
             )
         except Exception:
+            print(f"{bam_read}", file = sys.stderr)
+            LOGGER.info(f"{bam_read}")
             if missing_ok:
                 continue
             else:
@@ -868,6 +870,7 @@ def get_ref_reg_samples_metrics(
             sig_map_refiner,
             skip_sig_map_refine,
             reverse_signal,
+            missing_ok=missing_ok,
             **kwargs,
         )
         if sample_metrics is not None:
