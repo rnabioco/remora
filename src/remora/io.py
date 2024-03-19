@@ -759,8 +759,7 @@ def get_io_reads(bam_reads, pod5_dr, reverse_signal=False, missing_ok=False):
                 reverse_signal=reverse_signal,
             )
         except Exception:
-            print(f"{bam_read}", file = sys.stderr)
-            LOGGER.info(f"{bam_read}")
+            LOGGER.info(f"{bam_read.query_name} unable to retrieve from POD5")
             if missing_ok:
                 continue
             else:
