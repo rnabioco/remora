@@ -746,7 +746,7 @@ def get_pod5_reads(pod5_dr, read_ids):
     )
 
 
-def get_io_reads(bam_reads, pod5_dr, reverse_signal=False, missing_ok=False):
+def get_io_reads(bam_reads, pod5_dr, reverse_signal=False, missing_ok=True):
     pod5_reads = get_pod5_reads(
         pod5_dr, list(set(get_parent_id(bam_read) for bam_read in bam_reads))
     )
@@ -775,7 +775,7 @@ def get_reads_reference_regions(
     skip_sig_map_refine=False,
     max_reads=50,
     reverse_signal=False,
-    missing_ok=False,
+    missing_ok=True,
 ):
     all_bam_reads = []
     samples_read_ref_regs = []
@@ -809,7 +809,7 @@ def get_ref_reg_sample_metrics(
     skip_sig_map_refine=False,
     reverse_signal=False,
     ref_orient=True,
-    missing_ok=False,
+    missing_ok=True,
     **kwargs,
 ):
     io_reads = get_io_reads(
@@ -849,7 +849,7 @@ def get_ref_reg_samples_metrics(
     max_reads=None,
     reverse_signal=False,
     metric="dwell_trimmean",
-    missing_ok=False,
+    missing_ok=True,
     **kwargs,
 ):
     all_bam_reads = []
