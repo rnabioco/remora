@@ -717,6 +717,7 @@ def run_dataset_copy(args):
             raise RemoraError("Permission denied.")
         except Exception as e:
             RemoraError(f"Error: {e}")
+    src_fh.close()
     dataset = RemoraDataset(
         [CoreRemoraDataset(ds_out_dir) for ds_out_dir in ds_out_dirs],
         props,
@@ -1313,6 +1314,11 @@ def register_infer_from_pod5_and_bam(parser):
         "--log-filename",
         help="Log filename. Default: Don't output log file.",
     )
+    out_grp.add_argument(
+        "--preserve-move-tag",
+        action="store_true",
+        help="Preserve move tables in output BAM file.",
+    )
 
     mdl_grp = subparser.add_argument_group(
         "Model Arguments",
@@ -1608,6 +1614,7 @@ def run_infer_from_pod5_and_bam(args):
         num_post_process_workers=args.num_post_process_workers,
         batch_size=args.batch_size,
         ref_anchored=args.reference_anchored,
+        drop_move_tag=not args.preserve_move_tag,
     )
     LOGGER.info("Done")
 
