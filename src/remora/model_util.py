@@ -288,6 +288,7 @@ def export_model_dorado(ckpt, model, save_dir):
         "offset",
         "reverse_signal",
         "pa_scaling",
+        "base_start_justify",
     ):
         modbases[ckpt_key] = ckpt[ckpt_key]
 
