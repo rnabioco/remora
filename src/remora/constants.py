@@ -145,18 +145,28 @@ _kit14_5mc_ac_models = {
 }
 _kit14_5hmc_5mc_ac_models = {
     "sup": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_5hmC@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_5hmC@v1",
+            2: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_5hmC@v2",
+        },
         "v4.3.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v4.3.0_5mC_5hmC@v1"},
         "v4.2.0": {1: "dna_r10.4.1_e8.2_5khz_400bps_sup_v4.2.0_5hmc_5mc_v1"},
     },
     "hac": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_5hmC@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_5hmC@v1",
+            2: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_5hmC@v2",
+        },
         "v4.3.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v4.3.0_5mC_5hmC@v1"},
     },
 }
+
 _kit14_6ma_ac_models = {
     "sup": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_6mA@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_6mA@v1",
+            2: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_6mA@v2",
+        },
         "v4.3.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v4.3.0_6mA@v1"},
         "v4.2.0": {
             3: "dna_r10.4.1_e8.2_5khz_400bps_sup_v4.2.0_6ma_v3",
@@ -165,17 +175,26 @@ _kit14_6ma_ac_models = {
         "v4.0.1": {2: "res_dna_r10.4.1_e8.2_4khz_400bps_sup_v4.0.1_6mA_v2"},
     },
     "hac": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_6mA@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_6mA@v1",
+            2: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_6mA@v2",
+        },
         "v4.3.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v4.3.0_6mA@v1"},
     },
 }
 _kit14_4mc_5mc_ac_models = {
     "sup": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_4mC@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_4mC@v1",
+            2: "dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_4mC@v2",
+        },
         "v4.3.0": {1: "res_dna_r10.4.1_e8.2_400bps_sup@v4.3.0_4mC_5mC@v1"},
     },
     "hac": {
-        "v5.0.0": {1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_4mC@v1"},
+        "v5.0.0": {
+            1: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_4mC@v1",
+            2: "dna_r10.4.1_e8.2_400bps_hac@v5.0.0_5mC_4mC@v2",
+        },
     },
 }
 
@@ -194,12 +213,32 @@ _rna004_m6A_ac_models = {
     },
 }
 
+_rna004_inosine_m6A_ac_models = {
+    "sup": {
+        "v5.1.0": {1: "rna004_130bps_sup@v5.1.0_inosine_m6A@v1"},
+    },
+    "hac": {
+        "v5.1.0": {1: "rna004_130bps_hac@v5.1.0_inosine_m6A@v1"},
+    },
+}
+
+_rna004_m5C_ac_models = {
+    "sup": {
+        "v5.1.0": {1: "rna004_130bps_sup@v5.1.0_m5C@v1"},
+    },
+    "hac": {
+        "v5.1.0": {1: "rna004_130bps_hac@v5.1.0_m5C@v1"},
+    },
+}
+
 _rna004_pseU_ac_models = {
     "sup": {
         "v5.0.0": {1: "rna004_130bps_sup@v5.0.0_pseU@v1"},
+        "v5.1.0": {1: "rna004_130bps_sup@v5.1.0_pseU@v1"},
     },
     "hac": {
         "v5.0.0": {1: "rna004_130bps_hac@v5.0.0_pseU@v1"},
+        "v5.1.0": {1: "rna004_130bps_hac@v5.1.0_pseU@v1"},
     },
 }
 
@@ -246,6 +285,12 @@ MODEL_DICT = {
         },
         "inosine": {
             "A": _rna004_inosine_ac_models,
+        },
+        "inosine_m6A": {
+            "A": _rna004_inosine_m6A_ac_models,
+        },
+        "m5C": {
+            "C": _rna004_m5C_ac_models,
         },
     },
 }
