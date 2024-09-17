@@ -39,9 +39,11 @@ def mat_to_str(mat):
 ###################
 
 
-def compute_metrics(probs, labels, filt_frac):
+def compute_metrics(probs, labels, filt_frac, num_labels):
     pred_labels = np.argmax(probs, axis=1)
-    conf_mat = confusion_matrix(labels, pred_labels)
+    conf_mat = confusion_matrix(
+        labels, pred_labels, labels=np.arange(num_labels)
+    )
     correctly_labeled = pred_labels == labels
     acc = correctly_labeled.sum() / labels.size
 
@@ -60,7 +62,9 @@ def compute_metrics(probs, labels, filt_frac):
     if filt_labels.size == 0:
         return acc, conf_mat, 1.0, np.NAN, np.array([]), np.NAN
     filt_acc = correctly_labeled[conf_chunks].sum() / filt_labels.size
-    filt_conf_mat = confusion_matrix(filt_labels, pred_labels[conf_chunks])
+    filt_conf_mat = confusion_matrix(
+        filt_labels, pred_labels[conf_chunks], labels=np.arange(num_labels)
+    )
     filt_frac = 1 - (filt_labels.size / labels.size)
 
     return acc, conf_mat, filt_frac, filt_acc, filt_conf_mat, filt_thr
@@ -99,11 +103,14 @@ def add_unmodeled_labels(output, unmodeled_labels):
     return new_output
 
 
-def process_mods_probs(probs, labels, allow_unbalanced, pct_filt, name):
+def process_mods_probs(
+    probs, labels, allow_unbalanced, pct_filt, name, num_labels
+):
     if not allow_unbalanced:
-        nlabs = max(labels.max() + 1, probs.shape[1])
         # split probs
-        labels_probs = [probs[labels == mod_idx] for mod_idx in range(nlabs)]
+        labels_probs = [
+            probs[labels == mod_idx] for mod_idx in range(num_labels)
+        ]
         lab_sizes = [lp.shape[0] for lp in labels_probs]
         if len(lab_sizes) == 1:
             raise RemoraError(
@@ -133,7 +140,7 @@ def process_mods_probs(probs, labels, allow_unbalanced, pct_filt, name):
         filt_acc,
         filt_conf_mat,
         filt_thr,
-    ) = compute_metrics(probs, labels, pct_filt / 100)
+    ) = compute_metrics(probs, labels, pct_filt / 100, num_labels)
     ms = VAL_METRICS(
         loss=np.NAN,
         acc=acc,
@@ -205,6 +212,7 @@ class ValidationLogger:
                 if mb not in model_mod_bases
             ]
         )
+        num_labels = len(model_mod_bases) + unmodeled_labels.size + 1
         model.eval()
         torch.set_grad_enabled(False)
 
@@ -215,9 +223,10 @@ class ValidationLogger:
 
         if os.environ.get("LOG_SAFE", False):
             disable_pbar = True
-        for enc_kmers, sigs, labels in tqdm(
+        for sigs, labels, enc_kmers in tqdm(
             dataset,
             smoothing=0,
+            dynamic_ncols=True,
             desc="Batches",
             disable=disable_pbar,
         ):
@@ -246,7 +255,7 @@ class ValidationLogger:
             filt_acc,
             filt_conf_mat,
             filt_thr,
-        ) = compute_metrics(all_probs, all_labels, filt_frac)
+        ) = compute_metrics(all_probs, all_labels, filt_frac, num_labels)
         return VAL_METRICS(
             loss=np.mean(all_loss),
             acc=acc,
@@ -481,7 +490,7 @@ def parse_mod_bam(
     pysam_save = pysam.set_verbosity(0)
     do_warn_mod = do_warn_strand = True
     with pysam.AlignmentFile(bam_path, check_sq=False) as bam_fh:
-        for read in tqdm(bam_fh, smoothing=0):
+        for read in tqdm(bam_fh, smoothing=0, dynamic_ncols=True):
             do_warn_mod, do_warn_strand, valid_mods = check_mod_strand(
                 read, bam_path, alphabet, do_warn_mod, do_warn_strand
             )
@@ -591,4 +600,5 @@ def validate_modbams(
         allow_unbalanced,
         pct_filt,
         name,
+        len(alphabet),
     )

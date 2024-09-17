@@ -54,11 +54,13 @@ def register_dataset(parser):
     subparser.set_defaults(func=lambda x: subparser.print_help())
     #  Register dataset sub commands
     register_dataset_prepare(ssubparser)
+    register_dataset_prepare_basecall(ssubparser)
     register_dataset_inspect(ssubparser)
     register_dataset_make_config(ssubparser)
     register_dataset_merge(ssubparser)
     register_dataset_head(ssubparser)
     register_dataset_copy(ssubparser)
+    register_dataset_make_filter(ssubparser)
 
 
 def register_dataset_prepare(parser):
@@ -337,6 +339,226 @@ def run_dataset_prepare(args):
     LOGGER.info("Done")
 
 
+def register_dataset_prepare_basecall(parser):
+    subparser = parser.add_parser(
+        "prepare_basecall",
+        description="Prepare a core Remora dataset for basecaller training",
+        help="Prepare a core Remora dataset for basecaller training",
+        formatter_class=SubcommandHelpFormatter,
+    )
+    subparser.add_argument(
+        "pod5",
+        help="POD5 (file or directory) matched to bam file.",
+    )
+    subparser.add_argument(
+        "bam",
+        help="BAM file containing mv tags.",
+    )
+
+    out_grp = subparser.add_argument_group("Output Arguments")
+    out_grp.add_argument(
+        "--output-path",
+        default="remora_basecaller_training_dataset",
+        help="Output Remora training dataset directory. Cannot exist unless "
+        "--overwrite is specified in which case the directory will be removed.",
+    )
+    out_grp.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output directory if existing.",
+    )
+
+    data_grp = subparser.add_argument_group("Data Arguments")
+    data_grp.add_argument(
+        "--chunk-length",
+        default=constants.DEFAULT_BASECALL_CHUNK_LEN,
+        type=int,
+        help="""Number of signal points to include in a chunk. Smaller chunks
+        can be extracted at data reading time.""",
+    )
+    data_grp.add_argument(
+        "--min-samples-per-base",
+        type=int,
+        default=constants.DEFAULT_MIN_SAMPLES_PER_BASE,
+        help="""Minimum number of samples per base. This sets the size of the
+        ragged arrays of chunk sequences.""",
+    )
+    data_grp.add_argument(
+        "--kmer-context-bases",
+        nargs=2,
+        default=constants.DEFAULT_KMER_CONTEXT_BASES,
+        type=int,
+        metavar=("BASES_BEFORE", "BASES_AFTER"),
+        help="""Definition of k-mer (derived from the reference) passed into
+        the model along with each signal position.""",
+    )
+    data_grp.add_argument(
+        "--max-chunks-per-read",
+        type=int,
+        default=15,
+        help="Maxiumum number of chunks to extract from a single read.",
+    )
+    data_grp.add_argument(
+        "--num-reads",
+        type=int,
+        help="Number of reads.",
+    )
+    data_grp.add_argument(
+        "--basecall-anchor",
+        action="store_true",
+        help="""Make dataset from basecall sequence instead of aligned
+        reference sequence""",
+    )
+    data_grp.add_argument(
+        "--reverse-signal",
+        action="store_true",
+        help="""Is nanopore signal 3' to 5' orientation? Primarily for direct
+        RNA""",
+    )
+    data_grp.add_argument(
+        "--picoamp-scaling-basecall-model",
+        help="""Provide the path to the Dorado basecalling model directory
+        which will be linke with this modified base model. Produce dataset wtih
+        picoampere scaled signal. Note that this is incompatible with any
+        signal mapping refine arguments""",
+    )
+    data_grp.add_argument(
+        "--save-every",
+        default=100_000,
+        type=int,
+        help="""Flush dataset data and update dataset size at this interval.
+        Larger values will increase RAM usage, but could increase speed.""",
+    )
+    data_grp.add_argument(
+        "--skip-shuffle",
+        action="store_true",
+        help="""Skip shuffle of completed dataset. Note that shuffling requires
+        loading the entire signal array into memory. If dataset is very large
+        and shuffling is not required specify this flag.""",
+    )
+    data_grp.add_argument(
+        "--shuffle-batch-size",
+        type=int,
+        default=200_000,
+        help="""Number of training chunks to include in each shuffle. Smaller
+        values will be faster, but chunks from the same read will be supplied
+        together more often during training.""",
+    )
+
+    refine_grp = subparser.add_argument_group("Signal Mapping Refine Arguments")
+    refine_grp.add_argument(
+        "--refine-kmer-level-table",
+        help="""Tab-delimited file containing no header and two fields:
+        1. string k-mer sequence and 2. float expected normalized level.
+        All k-mers must be the same length and all combinations of the bases
+        'ACGT' must be present in the file.""",
+    )
+    refine_grp.add_argument(
+        "--refine-rough-rescale",
+        action="store_true",
+        help="""Apply a rough rescaling using quantiles of signal+move table
+        and levels.""",
+    )
+    refine_grp.add_argument(
+        "--refine-scale-iters",
+        default=-1,
+        type=int,
+        help="""Number of iterations of signal mapping refinement and signal
+        re-scaling to perform. Set to 0 in order to perform signal mapping
+        refinement, but skip re-scaling. Set to -1 (default) to skip signal
+        mapping (potentially using levels for rough rescaling).""",
+    )
+    refine_grp.add_argument(
+        "--refine-half-bandwidth",
+        default=constants.DEFAULT_REFINE_HBW,
+        type=int,
+        help="""Half bandwidth around signal mapping over which to search for
+        "new path.""",
+    )
+    refine_grp.add_argument(
+        "--refine-algo",
+        default=constants.DEFAULT_REFINE_ALGO,
+        choices=constants.REFINE_ALGOS,
+        help="Refinement algorithm to apply (if kmer level table is provided).",
+    )
+    refine_grp.add_argument(
+        "--refine-short-dwell-parameters",
+        default=constants.DEFAULT_REFINE_SHORT_DWELL_PARAMS,
+        type=float,
+        nargs=3,
+        metavar=("TARGET", "LIMIT", "WEIGHT"),
+        help="""Short dwell penalty refiner parameters. Dwells shorter than
+        LIMIT will be penalized a value of `WEIGHT * (dwell - TARGET)^2`.""",
+    )
+    refine_grp.add_argument(
+        "--rough-rescale-method",
+        default=constants.DEFAULT_ROUGH_RESCALE_METHOD,
+        choices=constants.ROUGH_RESCALE_METHODS,
+        help="""Use either least squares or Theil-Sen estimator for rough
+        rescaling.""",
+    )
+
+    comp_grp = subparser.add_argument_group("Compute Arguments")
+    comp_grp.add_argument(
+        "--num-extract-alignment-workers",
+        type=int,
+        default=1,
+        help="Number of signal extraction workers.",
+    )
+    comp_grp.add_argument(
+        "--num-extract-chunks-workers",
+        type=int,
+        default=1,
+        help="""Number of chunk extraction workers. If performing signal
+        refinement this should be increased.""",
+    )
+
+    subparser.set_defaults(func=run_dataset_prepare_basecall)
+
+
+def run_dataset_prepare_basecall(args):
+    from remora.refine_signal_map import SigMapRefiner
+    from remora.util import prepare_out_dir, parse_picoamps
+    from remora.prepare_train_data import extract_basecall_chunk_dataset
+
+    prepare_out_dir(args.output_path, args.overwrite)
+
+    sig_map_refiner = SigMapRefiner(
+        kmer_model_filename=args.refine_kmer_level_table,
+        do_rough_rescale=args.refine_rough_rescale,
+        scale_iters=args.refine_scale_iters,
+        algo=args.refine_algo,
+        half_bandwidth=args.refine_half_bandwidth,
+        sd_params=args.refine_short_dwell_parameters,
+        do_fix_guage=True,
+        rough_rescale_method=args.rough_rescale_method,
+    )
+    if not sig_map_refiner.is_valid:
+        raise RemoraError("Invalid signal mapping refiner settings.")
+    pa_scaling = parse_picoamps(
+        args.picoamp_scaling_basecall_model, sig_map_refiner
+    )
+    extract_basecall_chunk_dataset(
+        bam_path=args.bam,
+        pod5_path=args.pod5,
+        out_path=args.output_path,
+        chunk_context=(0, args.chunk_length),
+        min_samps_per_base=args.min_samples_per_base,
+        max_chunks_per_read=args.max_chunks_per_read,
+        pa_scaling=pa_scaling,
+        sig_map_refiner=sig_map_refiner,
+        kmer_context_bases=args.kmer_context_bases,
+        num_reads=args.num_reads,
+        num_extract_alignment_threads=args.num_extract_alignment_workers,
+        num_extract_chunks_threads=args.num_extract_chunks_workers,
+        basecall_anchor=args.basecall_anchor,
+        rev_sig=args.reverse_signal,
+        save_every=args.save_every,
+        skip_shuffle=args.skip_shuffle,
+    )
+    LOGGER.info("Done")
+
+
 def register_dataset_inspect(parser):
     subparser = parser.add_parser(
         "inspect",
@@ -359,17 +581,12 @@ def register_dataset_inspect(parser):
 def run_dataset_inspect(args):
     import json
 
-    from remora.data_chunks import (
-        load_dataset,
-        CoreRemoraDataset,
-        RemoraDataset,
-    )
+    from remora.data_chunks import load_dataset
 
-    paths, props, hashes = load_dataset(args.remora_dataset_path)
-    datasets = [
-        CoreRemoraDataset(path, do_check_super_batches=True) for path in paths
-    ]
-    dataset = RemoraDataset(datasets, props, hashes)
+    dataset = load_dataset(
+        args.remora_dataset_path,
+        core_ds_kwargs={"do_check_super_batches": True},
+    )
     print(f"Dataset summary:\n{dataset.summary}")
     if args.out_path is not None:
         with open(args.out_path, "w") as fh:
@@ -405,6 +622,13 @@ def register_dataset_make_config(parser):
         globally with equal probability)""",
     )
     subparser.add_argument(
+        "--dataset-filters",
+        nargs="+",
+        help="""Specify filters file(s) to be applied to each dataset. Must be
+        the same length as the input datasets if provided. See remora dataset
+        make_filter for details.""",
+    )
+    subparser.add_argument(
         "--log-filename",
         help="Log filename. Default: Don't output log file.",
     )
@@ -413,49 +637,65 @@ def register_dataset_make_config(parser):
 
 def run_dataset_make_config(args):
     import json
+    from itertools import repeat
 
     import numpy as np
 
-    from remora.data_chunks import (
-        load_dataset,
-        CoreRemoraDataset,
-        RemoraDataset,
-    )
+    from remora.data_chunks import load_dataset, RemoraDataset
 
     if args.log_filename is not None:
         log.init_logger(args.log_filename)
-    if args.dataset_weights is not None:
+    if args.dataset_weights is None:
+        ds_weights = repeat(None)
+    else:
         if len(args.dataset_weights) != len(args.dataset_paths):
             raise RemoraError("Weights must be same length as input datasets.")
-        if any(w <= 0 for w in args.dataset_weights):
-            raise RemoraError("Weights must be positive.")
-    core_paths, core_weights, core_hashes = [], [], []
-    for ds_idx, ds_path in enumerate(args.dataset_paths):
-        paths, weights, hashes = load_dataset(ds_path)
-        if any(weights == 0):
+        if any(w < 0 for w in args.dataset_weights):
+            raise RemoraError("Weights must not be negative.")
+        ds_weights = args.dataset_weights
+    if args.dataset_filters is None:
+        dss_filts = repeat(None)
+    else:
+        if len(args.dataset_filters) != len(args.dataset_paths):
+            raise RemoraError("Filters must be same length as input datasets.")
+        dss_filts = args.dataset_filters
+    core_datasets, core_weights, core_hashes = [], [], []
+    for ds_path, ds_weight, ds_filts in zip(
+        args.dataset_paths, ds_weights, dss_filts
+    ):
+        if ds_filts == "None":
+            ds_filts = None
+        dataset = load_dataset(
+            ds_path, core_ds_kwargs={"filters_path": ds_filts}
+        )
+        if any(dataset.props == 0):
             empty_datasets = ", ".join(
-                [p for p, w in zip(paths, weights) if w == 0]
+                [p for p, w in zip(dataset.paths, dataset.props) if w == 0]
             )
             raise RemoraError(f"Encountered empty dataset: {empty_datasets}")
-        core_paths.extend(paths)
-        if args.dataset_weights is None:
-            weights *= sum([CoreRemoraDataset(path).size for path in paths])
+        weights = dataset.props.copy()
+        if ds_weight is None:
+            weights *= sum([ds.size for ds in dataset.datasets])
         else:
-            weights *= args.dataset_weights[ds_idx]
-        core_weights.extend(weights)
-        if hashes is None or core_hashes is None:
-            core_hashes = None
-            continue
-        core_hashes.extend(hashes)
+            weights *= ds_weight
+        for ds, ds_weight, ds_hash in zip(
+            dataset.datasets, weights, dataset.hashes
+        ):
+            # skip zero weight datasets
+            if ds_weight <= 0:
+                continue
+            core_datasets.append(ds)
+            core_weights.append(ds_weight)
+            core_hashes.append(ds_hash)
     core_weights = np.array(core_weights)
     dataset = RemoraDataset(
-        [CoreRemoraDataset(path) for path in core_paths],
+        core_datasets,
         core_weights / core_weights.sum(),
         core_hashes,
     )
     with open(args.out_path, "w") as fh:
         json.dump(dataset.get_config(), fh)
-    LOGGER.info(dataset.summary)
+    LOGGER.info("\n" + dataset.summary)
 
 
 def register_dataset_merge(parser):
@@ -496,9 +736,10 @@ def run_dataset_merge(args):
 
     from remora.data_chunks import (
         compute_best_split,
-        load_dataset,
+        extract_core_dataset_paths,
         CoreRemoraDataset,
         RemoraDataset,
+        DATASET_VERSION,
     )
     from remora.util import prepare_out_dir
 
@@ -506,7 +747,7 @@ def run_dataset_merge(args):
     all_paths = [
         sub_ds_path
         for ds_path in args.dataset_paths
-        for sub_ds_path in load_dataset(ds_path)[0]
+        for sub_ds_path in extract_core_dataset_paths(ds_path)
     ]
     dataset = RemoraDataset(
         [
@@ -517,6 +758,10 @@ def run_dataset_merge(args):
         ],
         np.ones(len(all_paths)),
     )
+    common_extra_arrays = set.intersection(
+        *[set(ds.metadata.extra_array_names) for ds in dataset.datasets]
+    )
+
     LOGGER.info(f"Loaded dataset:\n{dataset.summary}")
     merged_metadata = dataset.metadata.copy()
     ds_out_sizes = np.array([ds.size for ds in dataset.datasets])
@@ -530,6 +775,7 @@ def run_dataset_merge(args):
     )
     merged_metadata.dataset_start = 0
     merged_metadata.dataset_end = 0
+    merged_metadata.version = DATASET_VERSION
 
     merged_dataset = CoreRemoraDataset(
         data_path=args.out_path,
@@ -541,6 +787,7 @@ def run_dataset_merge(args):
     for ds, ds_out_size in tqdm(
         zip(dataset.datasets, ds_out_sizes),
         smoothing=0,
+        dynamic_ncols=True,
         desc="Datasets",
         total=ds_out_sizes.size,
     ):
@@ -550,12 +797,13 @@ def run_dataset_merge(args):
                 f"{ds_out_size:,}"
             )
             ds.metadata.dataset_end = ds_out_size
-        chunks_per_sb, _ = ds.adjust_batch_params()
-        total_sbs = ds.size // chunks_per_sb
+        total_sbs = ds.size // ds.super_batch_size
         LOGGER.debug(f"Adding dataset from {ds.data_path}")
+        ds.set_return_arrays(common_extra_arrays)
         for sb_idx, sb in tqdm(
             enumerate(ds.iter_super_batches()),
             smoothing=0,
+            dynamic_ncols=True,
             total=total_sbs,
             leave=False,
             position=1,
@@ -627,12 +875,13 @@ def run_dataset_head(args):
     for sb_idx, sb in tqdm(
         enumerate(in_ds.iter_super_batches()),
         smoothing=0,
+        dynamic_ncols=True,
         leave=False,
         position=1,
         desc="Batches",
     ):
         if (
-            head_dataset.metadata.dataset_end + sb["labels"].size
+            head_dataset.metadata.dataset_end + sb["sequence_lengths"].size
             >= args.num_chunks
         ):
             num_chunks = args.num_chunks - head_dataset.metadata.dataset_end
@@ -662,7 +911,7 @@ def register_dataset_copy(parser):
         multi-part datasets to faster disk access locations. New config will be
         at [out_path]/dataset.cfg and core datasets will be sub-directories
         [out_path]/dataset_001, [out_path]/dataset_002, etc.""",
-        help="Move dataset to new location",
+        help="Copy dataset to new location",
         formatter_class=SubcommandHelpFormatter,
     )
     subparser.add_argument(
@@ -694,16 +943,18 @@ def run_dataset_copy(args):
 
     out_dir = Path(args.out_path)
     prepare_out_dir(args.out_path, args.overwrite)
-    paths, props, hashes = load_dataset(args.in_path)
+    in_dataset = load_dataset(args.in_path)
     src_fh = open(out_dir / "sources.txt", "w")
     ds_out_dirs = []
-    for ds_idx, src_path in enumerate(paths):
+    if in_dataset.num_datasets > 10_000:
+        raise RemoraError("Cannot copy more than 10,000 datasets")
+    for ds_idx, src_path in enumerate(in_dataset.paths):
         for item in os.listdir(src_path):
             if os.path.isdir(os.path.join(src_path, item)):
                 raise RemoraError(
                     f"Source dataset has nested directory: {item}"
                 )
-        ds_out_dir = out_dir / f"dataset_{ds_idx:03}"
+        ds_out_dir = out_dir / f"dataset_{ds_idx:05}"
         ds_out_dirs.append(ds_out_dir)
         src_fh.write(f"{src_path}\t{ds_out_dir}\n")
         try:
@@ -719,13 +970,122 @@ def run_dataset_copy(args):
             RemoraError(f"Error: {e}")
     src_fh.close()
     dataset = RemoraDataset(
-        [CoreRemoraDataset(ds_out_dir) for ds_out_dir in ds_out_dirs],
-        props,
-        hashes,
+        [
+            CoreRemoraDataset(ds_out_dir, filters_path=ds_filts_path)
+            for ds_out_dir, ds_filts_path in zip(
+                ds_out_dirs, in_dataset.filter_paths
+            )
+        ],
+        in_dataset.props,
+        in_dataset._hashes,
     )
     with open(out_dir / "dataset.cfg", "w") as fh:
         json.dump(dataset.get_config(), fh)
     LOGGER.info(dataset.summary)
+
+
+def register_dataset_make_filter(parser):
+    subparser = parser.add_parser(
+        "make_filter",
+        description="""Make dataset filter. Filters will be applied at access
+        time and will not effect the dataset contents.""",
+        help="Create dataset filter",
+        formatter_class=SubcommandHelpFormatter,
+    )
+    subparser.add_argument(
+        "--dataset",
+        help="""Dataset path. Filter will be saved in the default location and
+        applied by default.""",
+    )
+    subparser.add_argument(
+        "--output-filter-path",
+        help="""Output path for filter file.""",
+    )
+    subparser.add_argument(
+        "--filter",
+        nargs=4,
+        metavar=("COLUMN", "OPERATOR", "THRESHOLD", "IS_QUANTILE"),
+        action="append",
+        help="""Filter to be applied. Four values are required and represent
+        the 1) column to be filtered (must be available in dataset or specified
+        in remora.data_chunks.DatasetFilters.derived_cols), 2) operator to be
+        applied (must be attribute of operator package) 3) threshold value,
+        and 4) is the thershold value a quantile? (default is a raw threshold
+        value)""",
+    )
+    subparser.add_argument(
+        "--store-raw-thresholds",
+        action="store_true",
+        help="""Store raw threshold to avoid computing these at access time.
+        Storing quantiles where specified will make a filter file which can be
+        copied to new datasets retaining the quantile value.""",
+    )
+    subparser.add_argument(
+        "--log-filename",
+        help="Log filename. Default: Don't output log file.",
+    )
+    subparser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing filter file.",
+    )
+    subparser.set_defaults(func=run_dataset_make_filter)
+
+
+def run_dataset_make_filter(args):
+    import json
+
+    from remora import log, util
+    from remora.data_chunks import (
+        load_dataset,
+        CoreRemoraDataset,
+        DatasetFilters,
+    )
+
+    def open_filter_file(path):
+        if path.exists() and not args.overwrite:
+            raise RemoraError(
+                "Filter file already exists and --overwrite not specified"
+            )
+        return open(path, "w")
+
+    if args.log_filename is not None:
+        log.init_logger(args.log_filename)
+
+    raw_filters = [
+        (col, op_str, float(thresh), util.str_to_bool(is_quantile))
+        for col, op_str, thresh, is_quantile in args.filter
+    ]
+    if args.dataset is not None:
+        ds = load_dataset(args.dataset)
+        if ds.num_datasets == 1:
+            ds = ds.datasets[0]
+        else:
+            raise NotImplementedError("Cannot apply filter to config dataset")
+        filt_path = (
+            Path(ds.data_path) / CoreRemoraDataset._filters_path
+            if args.output_filter_path is None
+            else Path(args.output_filter_path)
+        )
+        filt_fh = open_filter_file(filt_path)
+        # load filters to validate and compute quantiles
+        filters = DatasetFilters.from_raw_filters(raw_filters, ds)
+        if args.store_raw_thresholds:
+            raw_filters = filters.storage_filters
+    elif args.output_filter_path is not None:
+        filt_fh = open_filter_file(Path(args.output_filter_path))
+    else:
+        if args.store_raw_thresholds and any(
+            isq for _, _, _, isq in raw_filters
+        ):
+            raise RemoraError(
+                """Cannot store computed quantile values without loading a
+                dataset"""
+            )
+        filt_fh = sys.stdout
+    json.dump(raw_filters, filt_fh)
+    if filt_fh != sys.stdout:
+        filt_fh.close()
 
 
 ################
@@ -1749,11 +2109,11 @@ def register_validate_from_modbams(parser):
     )
     subparser.add_argument(
         "--extra-bases",
-        help="Extra canoncial or modified base single letter codes not in "
-        "the ground truth bed files which should be added to the accepted "
-        "alphabet. For example, to run a sample with canonical ground truth "
-        "(C) and 5mC and 5hmC calls (m and h) modified base calls this "
-        "argument would be `--extra-bases mh`",
+        help="""Extra canoncial or modified base single letter codes not in
+        the ground truth bed files which should be added to the accepted
+        alphabet. For example, consider a BED file with only canonical (C)
+        sites. To extract 5mC (m) and 5hmC (h) calls from the modBAM the
+        `--extra-bases mh` argument should be supplied""",
     )
     subparser.add_argument(
         "--log-filename",
@@ -1765,7 +2125,7 @@ def register_validate_from_modbams(parser):
         help="""Specify that the user has checked that the modified base tag
         (MM) uses the explicit (`?`) specifier. With the implicit (`.`) tag
         type  pysam will return invalid modified base probabilities and result
-        may be invalid..""",
+        may be invalid""",
     )
 
     subparser.set_defaults(func=run_validate_modbams)
@@ -1775,14 +2135,14 @@ def run_validate_modbams(args):
     from remora.validate import validate_modbams
 
     LOGGER.warning(
-        """This cmomand is deprecated and will be removed from a future version
+        """This command is deprecated and will be removed from a future version
         of Remora. Please use the `modkit validate` command."""
     )
     if args.explicit_mod_tag_used:
         LOGGER.warning(
             """
             If implict modified tag types are included (from all-context
-            modified base models) results from this command will be inavlid.
+            modified base models) results from this command will be invalid.
             Please see pysam issue here:
             https://github.com/pysam-developers/pysam/issues/1123"""
         )
@@ -1908,11 +2268,7 @@ def run_validate_from_remora_dataset(args):
     from remora.util import parse_device
     from remora.model_util import load_model
     from remora.validate import ValidationLogger
-    from remora.data_chunks import (
-        RemoraDataset,
-        CoreRemoraDataset,
-        load_dataset,
-    )
+    from remora.data_chunks import load_dataset
 
     if args.log_filename is not None:
         log.init_logger(args.log_filename)
@@ -1931,25 +2287,22 @@ def run_validate_from_remora_dataset(args):
     torch.set_grad_enabled(False)
 
     LOGGER.info("Loading Remora dataset")
-    override_metadata = {"extra_arrays": {}}
+    override_metadata = {}
     override_metadata["kmer_context_bases"] = model_metadata[
         "kmer_context_bases"
     ]
     override_metadata["chunk_context"] = model_metadata["chunk_context"]
-    paths, props, hashes = load_dataset(args.remora_dataset_path)
-    dataset = RemoraDataset(
-        [
-            CoreRemoraDataset(
-                path,
-                override_metadata=override_metadata,
-                infinite_iter=False,
-                do_check_super_batches=True,
-            )
-            for path in paths
-        ],
-        props,
-        hashes,
-        batch_size=args.batch_size,
+    dataset = load_dataset(
+        args.remora_dataset_path,
+        core_ds_kwargs={
+            "override_metadata": override_metadata,
+            "infinite_iter": False,
+            "do_check_super_batches": True,
+        },
+        ds_kwargs={
+            "batch_size": args.batch_size,
+            "return_arrays": ["signal", "modbase_label", "enc_kmer"],
+        },
     )
     LOGGER.info(f"Loaded dataset summary:\n{dataset.summary}")
     if not args.read_batches_from_disk:
