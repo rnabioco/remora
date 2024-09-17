@@ -25,6 +25,8 @@ LOGGER = log.get_logger()
 
 _SIG_PROF_FN = os.getenv("REMORA_EXTRACT_SIGNAL_PROFILE_FILE")
 _ALIGN_PROF_FN = os.getenv("REMORA_EXTRACT_ALIGN_PROFILE_FILE")
+_ITER_ALIGN_PROF_FN = os.getenv("REMORA_ITER_ALIGN_PROFILE_FILE")
+_ADD_SIG_PROF_FN = os.getenv("REMORA_ADD_SIG_PROFILE_FILE")
 
 METRIC_PCTL_RANGE = (0.2, 99.8)
 BASE_COLORS = {
@@ -259,6 +261,7 @@ class ReadIndexedBam:
         self._bam_idx = defaultdict(list)
         pbar = tqdm(
             smoothing=0,
+            dynamic_ncols=True,
             unit=" Reads",
             desc="Indexing BAM by parent read id",
             disable=os.environ.get("LOG_SAFE", False),
@@ -391,22 +394,6 @@ def get_read_ids(bam_idx, pod5_dr, num_reads, return_num_bam_reads=False):
     return both_read_ids, num_reads
 
 
-def parse_move_tag(
-    mv_tag, sig_len, seq_len=None, check=True, reverse_signal=False
-):
-    stride = mv_tag[0]
-    mv_table = np.array(mv_tag[1:])
-    query_to_signal = np.nonzero(mv_table)[0] * stride
-    query_to_signal = np.concatenate([query_to_signal, [sig_len]])
-    if reverse_signal:
-        query_to_signal = sig_len - query_to_signal[::-1]
-    if check and seq_len is not None and query_to_signal.size - 1 != seq_len:
-        raise RemoraError("Move table discordant with basecalls")
-    if check and mv_table.size != sig_len // stride:
-        raise RemoraError("Move table discordant with signal")
-    return query_to_signal, mv_table, stride
-
-
 #######################
 # POD5/BAM Extraction #
 #######################
@@ -483,6 +470,79 @@ if _SIG_PROF_FN:
         sig_prof = cProfile.Profile()
         retval = sig_prof.runcall(_iter_signal_wrapper, *args, **kwargs)
         sig_prof.dump_stats(_SIG_PROF_FN)
+        return retval
+
+
+def iter_alignments(
+    bam_path,
+    child_read_id_subset=None,
+    parent_read_id_subset=None,
+    skip_non_primary=True,
+    pa_scaling=None,
+):
+    pa_kwargs = {}
+    if pa_scaling is not None:
+        pa_kwargs["shift_pa_to_zc_pa"] = pa_scaling[0]
+        pa_kwargs["scale_pa_to_zc_pa"] = pa_scaling[1]
+    with pysam.AlignmentFile(bam_path, mode="rb", check_sq=False) as bam_fh:
+        for bam_read in bam_fh:
+            if (
+                child_read_id_subset is not None
+                and bam_read.query_name not in child_read_id_subset
+            ):
+                yield None, "Child read ID filtered"
+                continue
+            parent_read_id = get_parent_id(bam_read)
+            if (
+                parent_read_id_subset is not None
+                and parent_read_id not in parent_read_id_subset
+            ):
+                yield None, "Parent read ID filtered"
+                continue
+            if skip_non_primary and not read_is_primary(bam_read):
+                yield None, "Non-primary alignment"
+                continue
+            io_read = Read(
+                read_id=parent_read_id,
+                **pa_kwargs,
+            )
+            io_read.add_alignment(bam_read)
+            yield io_read, None
+
+
+if _ITER_ALIGN_PROF_FN:
+    _iter_align_wrapper = iter_alignments
+
+    def iter_alignments(*args, **kwargs):
+        import cProfile
+
+        iter_align_prof = cProfile.Profile()
+        retval = iter_align_prof.runcall(_iter_align_wrapper, *args, **kwargs)
+        iter_align_prof.dump_stats(_ITER_ALIGN_PROF_FN)
+        return retval
+
+
+def add_signal(read_err, p5_read, rev_sig=False):
+    io_read, err = read_err
+    if io_read is None:
+        return [read_err]
+    try:
+        io_read.add_signal(p5_read, reverse_signal=rev_sig)
+    except RemoraError as e:
+        LOGGER.debug(f"{io_read.read_id} Add signal error: {e}")
+        return io_read, str(e)
+    return io_read, ""
+
+
+if _ADD_SIG_PROF_FN:
+    _add_sig_wrapper = add_signal
+
+    def add_signal(*args, **kwargs):
+        import cProfile
+
+        add_sig_prof = cProfile.Profile()
+        retval = add_sig_prof.runcall(_add_sig_wrapper, *args, **kwargs)
+        add_sig_prof.dump_stats(_ADD_SIG_PROF_FN)
         return retval
 
 
@@ -780,19 +840,21 @@ def get_io_reads(
     )
     io_reads = []
     for bam_read in bam_reads:
-        try:
-            io_read = Read.from_pod5_and_alignment(
-                pod5_read_record=pod5_reads[get_parent_id(bam_read)],
+        parent_rid = get_parent_id(bam_read)
+        p5_record = pod5_reads.get(parent_rid, None)
+        if p5_record is None:
+            if missing_ok:
+                continue
+            else:
+                raise RemoraError(f"BAM record not found in POD5 {parent_rid}")
+        io_reads.append(
+            Read.from_pod5_and_alignment(
+                pod5_read_record=p5_record,
                 alignment_record=bam_read,
                 reverse_signal=reverse_signal,
                 pa_scaling=pa_scaling,
             )
-        except Exception:
-            if missing_ok:
-                continue
-            else:
-                raise RemoraError("BAM record not found in POD5")
-        io_reads.append(io_read)
+        )
     return io_reads
 
 
@@ -1578,6 +1640,7 @@ def plot_signal_at_ref_region(
     reverse_signal=False,
     pa_scaling=None,
     signal_type="norm",
+    missing_ok=False,
     **kwargs,
 ):
     """Plot signal from reads at a reference region.
@@ -1590,6 +1653,9 @@ def plot_signal_at_ref_region(
         skip_sig_map_refine (bool): Skip signal mapping refinement
         max_reads (int): Maximum reads to plot (TODO: add overplotting options)
         reverse_signal (bool): Is nanopore signal 3'>5' orientation?
+        pa_scaling (tuple): pico-amp scaling values
+        signal_type (string): Signal normalization string
+        missing_ok (bool): Ok for BAM reads to be missing from POD5?
         **kwargs: Passed on to plot_ref_region_reads
 
     Returns:
@@ -1605,6 +1671,7 @@ def plot_signal_at_ref_region(
         reverse_signal=reverse_signal,
         pa_scaling=pa_scaling,
         signal_type=signal_type,
+        missing_ok=missing_ok,
     )
     seq, levels = get_ref_seq_and_levels_from_reads(
         ref_reg, chain(*reg_bam_reads), sig_map_refiner
@@ -1763,7 +1830,8 @@ class Read:
         stride (int): Basecalling model stride. Move table (mv_table) entries
             occur at regular stride intervals through the signal.
         mv_table (np.array): Move table. `1` entries indicate base output
-            position. See Dorado documentation/SAM.md.
+            position. See Dorado documentation/SAM.md. Attribute may be
+            deprecated in the future.
         query_to_signal (np.ndarray): Array with length one longer than
             basecalled sequence (`len(io_read.seq) + 1`) where entries
             represent assigned position in io_read.dacs. This attribute is
@@ -1795,6 +1863,8 @@ class Read:
             updated when io_read.set_refine_signal_mapping(ref_mapping=True)
             is called.
         full_align (dict): Dictionary representation of BAM record.
+        is_mapped (bool): Is this record mapped to the reference?
+        read_metrics (dict): Metrics related to this read. See util.READ_METRICS
     """
 
     read_id: str
@@ -1816,8 +1886,12 @@ class Read:
     cigar: list = None
     ref_to_signal: np.ndarray = None
     full_align: dict = None
+    is_mapped: bool = False
+    read_metrics: dict = None
     _child_read_id: str = None
     _sig_len: int = None
+    _adjusted_query_to_signal: bool = False
+    _trim_tags: dict = None
 
     @property
     def pa_signal(self):
@@ -1966,6 +2040,86 @@ class Read:
         read.ref_reg = None
         return read, simplex_duplex_mapping.duplex_offset
 
+    def adjust_move_table(self, reverse_signal=False, check=True):
+        if self._adjusted_query_to_signal:
+            LOGGER.debug("Read move table was previously adjusted")
+            return
+        # add last point to query_to_signal
+        self.query_to_signal = np.concatenate(
+            [self.query_to_signal, [self.sig_len]]
+        )
+        if reverse_signal:
+            self.query_to_signal = self.sig_len - self.query_to_signal[::-1]
+        self._adjusted_query_to_signal = True
+        if check:
+            if self.query_to_signal.size - 1 != len(self.seq):
+                raise RemoraError("Move table discordant with basecalls")
+            if self.mv_table.size != self.sig_len // self.stride:
+                raise RemoraError("Move table discordant with signal")
+
+    def trim_signal(self, reverse_signal):
+        if self.dacs is None or self._trim_tags is None:
+            return
+        if reverse_signal:
+            self.dacs = self.dacs[::-1]
+        # trim for split read sp tag
+        self.dacs = self.dacs[self._trim_tags["sp"] :]
+        # trim for start and end read trimming
+        ns = self._trim_tags["ns"]
+        if ns is None:
+            ns = self.dacs.size
+        self.dacs = self.dacs[self._trim_tags["ts"] : ns]
+        if reverse_signal:
+            self.dacs = self.dacs[::-1]
+
+    def compute_ref_to_signal(self):
+        if (
+            not self.is_mapped
+            or self.cigar is None
+            or self.ref_seq is None
+            or self.query_to_signal is None
+            or not self._adjusted_query_to_signal
+        ):
+            return
+        self.ref_to_signal = data_chunks.compute_ref_to_signal(
+            query_to_signal=self.query_to_signal,
+            cigar=self.cigar,
+        )
+        # +1 because knots include the end position of the last base
+        if self.ref_to_signal.size != len(self.ref_seq) + 1:
+            LOGGER.debug(
+                f"{self.child_read_id} discordant ref seq lengths: "
+                f"move+cigar:{self.ref_to_signal.size} "
+                f"ref_seq:{len(self.ref_seq)}"
+            )
+            raise RemoraError("Discordant ref seq lengths")
+        self.ref_reg.end = self.ref_reg.start + self.ref_to_signal.size - 1
+
+    def add_signal_metrics(self):
+        if self.read_metrics is None:
+            self.read_metrics = {}
+        if self.dacs is not None:
+            for metric_name, metric in util.SIGNAL_METRICS.items():
+                try:
+                    self.read_metrics[metric_name] = metric.func(self)
+                except Exception:
+                    LOGGER.debug(
+                        f"Parsing {metric_name} from {self.read_id} failed"
+                    )
+                self.read_metrics[metric_name] = metric.default
+
+    def add_mapping_metrics(self, alignment_record):
+        if self.read_metrics is None:
+            self.read_metrics = {}
+        for metric_name, metric in util.MAPPING_METRICS.items():
+            try:
+                self.read_metrics[metric_name] = metric.func(alignment_record)
+            except Exception:
+                LOGGER.debug(
+                    f"Parsing {metric_name} from {self.read_id} failed"
+                )
+                self.read_metrics[metric_name] = metric.default
+
     def add_alignment(
         self,
         alignment_record,
@@ -1990,21 +2144,20 @@ class Read:
             and alignment_record.is_reverse
         ):
             raise RemoraError("Unmapped reads cannot map to reverse strand.")
-        if self.dacs is None:
-            raise RemoraError("Must add signal to io.Read before alignment.")
         self.full_align = alignment_record.to_dict()
 
         tags = dict(alignment_record.tags)
-        if reverse_signal:
-            self.dacs = self.dacs[::-1]
-        # trim for split read sp tag
-        self.dacs = self.dacs[tags.get("sp", 0) :]
-        # trim for start and end read trimming
-        self.dacs = self.dacs[
-            tags.get("ts", 0) : tags.get("ns", self.dacs.size)
-        ]
-        if reverse_signal:
-            self.dacs = self.dacs[::-1]
+        try:
+            self._trim_tags = dict(
+                (tag, tags.get(tag, dv))
+                for tag, dv in (("sp", 0), ("ts", 0), ("ns", None))
+            )
+        except KeyError:
+            pass
+        self.trim_signal(reverse_signal)
+        # update signal metrics and add mapping metrics
+        self.add_signal_metrics()
+        self.add_mapping_metrics(alignment_record)
 
         parent_read_id = tags.get("pi", None)
         if parent_read_id is None:
@@ -2019,12 +2172,11 @@ class Read:
         if alignment_record.is_reverse:
             self.seq = util.revcomp(self.seq)
         try:
-            self.query_to_signal, self.mv_table, self.stride = parse_move_tag(
-                tags["mv"],
-                sig_len=self.sig_len,
-                seq_len=len(self.seq),
-                reverse_signal=reverse_signal,
-            )
+            self.stride = tags["mv"][0]
+            self.mv_table = np.array(tags["mv"][1:])
+            self.query_to_signal = np.nonzero(self.mv_table)[0] * self.stride
+            if self.dacs is not None:
+                self.adjust_move_table(reverse_signal=reverse_signal)
         except KeyError:
             LOGGER.debug(f"Move table not found for {self.child_read_id}")
             self.query_to_signal = self.mv_table = self.stride = None
@@ -2033,15 +2185,24 @@ class Read:
             self.shift_pa_to_norm = tags["sm"]
             self.scale_pa_to_norm = tags["sd"]
         except KeyError:
-            self.compute_pa_to_norm_scaling()
+            if self.dacs is not None:
+                self.compute_pa_to_norm_scaling()
 
-        self.shift_dacs_to_norm = self.shift_dacs_to_pa + (
-            self.scale_dacs_to_pa * self.shift_pa_to_norm
-        )
-        self.scale_dacs_to_norm = self.scale_dacs_to_pa * self.scale_pa_to_norm
+        if (
+            self.shift_pa_to_norm is not None
+            and self.shift_dacs_to_pa is not None
+        ):
+            self.shift_dacs_to_norm = self.shift_dacs_to_pa + (
+                self.scale_dacs_to_pa * self.shift_pa_to_norm
+            )
+            self.scale_dacs_to_norm = (
+                self.scale_dacs_to_pa * self.scale_pa_to_norm
+            )
 
         if not parse_ref_align or alignment_record.is_unmapped:
+            self.is_mapped = False
             return
+        self.is_mapped = True
 
         self.ref_reg = RefRegion(
             ctg=alignment_record.reference_name,
@@ -2061,24 +2222,38 @@ class Read:
             if self.ref_seq is not None:
                 self.ref_seq = util.revcomp(self.ref_seq)
             self.cigar = self.cigar[::-1]
+        self.compute_ref_to_signal()
+
+    def add_signal(
+        self,
+        pod5_read,
+        reverse_signal=False,
+    ):
+        """Add signal to read object
+
+        Args:
+            pod5_read (pod5.ReadRecord)
+            reverse_signal (bool): Does this read derive from 3' to 5' signal
+                (RNA reads)
+        """
+        self.dacs = pod5_read.signal
+        if reverse_signal:
+            self.dacs = self.dacs[::-1]
+        self.trim_signal(reverse_signal)
+        self.adjust_move_table(reverse_signal=reverse_signal)
+        if self.shift_pa_to_norm is None:
+            self.compute_pa_to_norm_scaling()
         if (
-            self.ref_reg.ctg is not None
-            and self.ref_seq is not None
-            and self.query_to_signal is not None
+            self.shift_pa_to_norm is not None
+            and self.shift_dacs_to_pa is not None
         ):
-            self.ref_to_signal = data_chunks.compute_ref_to_signal(
-                query_to_signal=self.query_to_signal,
-                cigar=self.cigar,
+            self.shift_dacs_to_norm = self.shift_dacs_to_pa + (
+                self.scale_dacs_to_pa * self.shift_pa_to_norm
             )
-            # +1 because knots include the end position of the last base
-            if self.ref_to_signal.size != len(self.ref_seq) + 1:
-                LOGGER.debug(
-                    f"{self.child_read_id} discordant ref seq lengths: "
-                    f"move+cigar:{self.ref_to_signal.size} "
-                    f"ref_seq:{len(self.ref_seq)}"
-                )
-                raise RemoraError("Discordant ref seq lengths")
-            self.ref_reg.end = self.ref_reg.start + self.ref_to_signal.size - 1
+            self.scale_dacs_to_norm = (
+                self.scale_dacs_to_pa * self.scale_pa_to_norm
+            )
+        self.compute_ref_to_signal()
 
     @classmethod
     def from_pod5_and_alignment(
@@ -2168,6 +2343,7 @@ class Read:
             seq_to_sig_map=shift_seq_to_sig,
             str_seq=seq,
             read_id=self.read_id,
+            read_metrics=self.read_metrics,
             **scale_kwargs,
         )
         remora_read.check()

@@ -9,6 +9,10 @@ DEFAULT_MIN_SAMPLES_PER_BASE = 5
 DEFAULT_KMER_CONTEXT_BASES = (4, 4)
 DEFAULT_KMER_LEN = sum(DEFAULT_KMER_CONTEXT_BASES) + 1
 DEFAULT_FILT_FRAC = 0.1
+WARN_PROP_REMOVED_THRESH = 0.5
+
+# basecall chunk defaults
+DEFAULT_BASECALL_CHUNK_LEN = 3_600
 
 # train args
 DEFAULT_EPOCHS = 100
@@ -43,6 +47,22 @@ DEFAULT_REFINE_HBW = 5
 
 MODBASE_MODEL_NAME = "modbase_model.pt"
 MODEL_DATA_DIR_NAME = "trained_models"
+
+# set string values for sequence output types from datasets
+# encoded k-mers for standard Remora models
+DATASET_ENC_KMER = "enc_kmer"
+# sequences and lengths for basecaller
+DATASET_SEQS_AND_LENS = "seq_and_len"
+DATASET_SEQ_OUTPUTS = dict(
+    [
+        (DATASET_ENC_KMER, ["enc_kmer"]),
+        (DATASET_SEQS_AND_LENS, ["seq", "seq_len"]),
+    ]
+)
+DATASET_TYPE_MODBASE = "modbase"
+DATASET_TYPE_SEQ = "sequence"
+DATASET_TYPES = set((DATASET_TYPE_MODBASE, DATASET_TYPE_SEQ))
+
 
 """
 The default model is the first key at every level after the pore and mod.

@@ -11,8 +11,6 @@ from thop import profile
 from torch.utils.data import DataLoader
 
 from remora.data_chunks import (
-    RemoraDataset,
-    CoreRemoraDataset,
     load_dataset,
     dataloader_worker_init,
 )
@@ -201,25 +199,22 @@ def train_model(
 
     LOGGER.info("Loading dataset from Remora dataset config")
     # don't load extra arrays for training
-    override_metadata = {"extra_arrays": {}}
+    override_metadata = {"extra_metadata_arrays": {"modbase_label"}}
     if kmer_context_bases is not None:
         override_metadata["kmer_context_bases"] = kmer_context_bases
     if chunk_context is not None:
         override_metadata["chunk_context"] = chunk_context
-    paths, props, hashes = load_dataset(remora_dataset_path)
-    dataset = RemoraDataset(
-        [
-            CoreRemoraDataset(
-                path,
-                override_metadata=override_metadata,
-            )
-            for path in paths
-        ],
-        props,
-        hashes,
-        batch_size=batch_size,
-        super_batch_size=super_batch_size,
-        super_batch_sample_frac=super_batch_sample_frac,
+    dataset = load_dataset(
+        remora_dataset_path,
+        core_ds_kwargs={"override_metadata": override_metadata},
+        ds_kwargs={
+            "batch_size": batch_size,
+            "super_batch_size": super_batch_size,
+            "super_batch_sample_frac": super_batch_sample_frac
+            if super_batch_sample_frac < 1.0
+            else None,
+            "return_arrays": ["signal", "modbase_label", "enc_kmer"],
+        },
     )
     # TODO move hash computation into background worker and write this from
     # that worker as well. This command stalls startup too much
@@ -310,22 +305,20 @@ def train_model(
             assert len(ext_val_names) == len(ext_val)
         ext_datasets = []
         for e_name, e_path in zip(ext_val_names, ext_val):
-            paths, props, hashes = load_dataset(e_path.strip())
-            ext_val_ds = RemoraDataset(
-                [
-                    CoreRemoraDataset(
-                        path,
-                        override_metadata=override_metadata,
-                        infinite_iter=False,
-                        do_check_super_batches=True,
-                    )
-                    for path in paths
-                ],
-                props,
-                hashes,
-                batch_size=batch_size,
+            ext_val_ds = load_dataset(
+                e_path.strip(),
+                core_ds_kwargs={
+                    "override_metadata": override_metadata,
+                    "infinite_iter": False,
+                    "do_check_super_batches": True,
+                },
+                ds_kwargs={
+                    "batch_size": batch_size,
+                    "return_arrays": ["signal", "modbase_label", "enc_kmer"],
+                },
             )
             ext_val_ds.update_metadata(dataset)
+            ext_val_ds.set_use_constant_batch_mix(True)
             if not read_batches_from_disk:
                 ext_val_ds.load_all_batches()
             ext_datasets.append((e_name, ext_val_ds))
@@ -353,12 +346,10 @@ def train_model(
     scheduler = train_opts.load_scheduler(opt)
 
     LOGGER.debug("Splitting dataset")
-    trn_ds, val_ds = dataset.train_test_split(
-        num_test_chunks,
-        override_metadata=override_metadata,
-    )
+    trn_ds, val_ds = dataset.train_test_split(num_test_chunks)
     val_ds.super_batch_sample_frac = None
     val_ds.do_check_super_batches = True
+    val_ds.set_use_constant_batch_mix(True)
     if not read_batches_from_disk:
         val_ds.load_all_batches()
     trn_loader = DataLoader(
@@ -366,22 +357,22 @@ def train_model(
         batch_size=None,
         pin_memory=True,
         num_workers=2,
+        prefetch_factor=10,
         persistent_workers=True,
         worker_init_fn=dataloader_worker_init,
     )
     LOGGER.debug("Extracting head of train dataset")
-    val_trn_ds = trn_ds.head(
-        num_test_chunks,
-        override_metadata=override_metadata,
-    )
+    val_trn_ds = trn_ds.head(num_test_chunks)
     val_trn_ds.super_batch_sample_frac = None
     val_trn_ds.do_check_super_batches = True
     if not read_batches_from_disk:
         val_trn_ds.load_all_batches()
-    LOGGER.info(f"Dataset loaded with labels: {dataset.label_summary}")
-    LOGGER.info(f"Train labels: {trn_ds.label_summary}")
-    LOGGER.info(f"Held-out validation labels: {val_ds.label_summary}")
-    LOGGER.info(f"Training set validation labels: {val_trn_ds.label_summary}")
+    LOGGER.info(f"Dataset loaded with labels: {dataset.modbase_label_summary}")
+    LOGGER.info(f"Train labels: {trn_ds.modbase_label_summary}")
+    LOGGER.info(f"Held-out validation labels: {val_ds.modbase_label_summary}")
+    LOGGER.info(
+        f"Training set validation labels: {val_trn_ds.modbase_label_summary}"
+    )
 
     LOGGER.info("Running initial validation")
     # assess accuracy before first iteration
@@ -456,7 +447,7 @@ def train_model(
         "reverse_signal": dataset.metadata.reverse_signal,
         "mod_bases": dataset.metadata.mod_bases,
         "mod_long_names": dataset.metadata.mod_long_names,
-        "modified_base_labels": dataset.metadata.modified_base_labels,
+        "dataset_type": dataset.metadata.dataset_type,
         "kmer_context_bases": dataset.metadata.kmer_context_bases,
         "base_start_justify": dataset.metadata.base_start_justify,
         "offset": dataset.metadata.offset,
@@ -470,7 +461,7 @@ def train_model(
         model.train()
         pbar.n = 0
         pbar.refresh()
-        for epoch_i, (enc_kmers, sigs, labels) in enumerate(
+        for epoch_i, (sigs, labels, enc_kmers) in enumerate(
             islice(trn_loader, batches_per_epoch)
         ):
             outputs = model(sigs.to(device), enc_kmers.to(device))

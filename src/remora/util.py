@@ -12,7 +12,9 @@ from shutil import rmtree
 import multiprocessing as mp
 from threading import Thread
 from itertools import product
+from datetime import datetime
 from dataclasses import dataclass
+from collections import namedtuple
 from os.path import realpath, expanduser
 
 import torch
@@ -54,6 +56,19 @@ U_TO_T_BASES = {ord("U"): ord("T")}
 T_TO_U_BASES = {ord("T"): ord("U")}
 
 DEFAULT_QUEUE_SIZE = 10_000
+
+
+def str_to_bool(value):
+    truthy_values = {"true", "yes", "1", "t", "y"}
+    falsy_values = {"false", "no", "0", "f", "n"}
+
+    value_lower = value.strip().lower()
+    if value_lower in truthy_values:
+        return True
+    elif value_lower in falsy_values:
+        return False
+    else:
+        raise ValueError(f"Cannot convert {value} to boolean")
 
 
 def prepare_out_dir(out_dir, overwrite):
@@ -581,6 +596,67 @@ def profile(prof_path):
         return wrapper
 
     return inner
+
+
+################
+# Read Metrics #
+################
+
+
+REF_DT = datetime(2000, 1, 1)
+
+READ_METRIC = namedtuple("READ_METRIC", ("func", "default"))
+
+
+def compute_duration(io_read):
+    return io_read.dacs.size
+
+
+SIGNAL_METRICS = {"duration": READ_METRIC(compute_duration, 0)}
+
+
+def compute_percent_identity(bam_read):
+    """Compute percent identity, defined as edit distance over total alignment
+    length.
+    """
+    M, I, D, N, S, H, P, E, X, B, NM = bam_read.get_cigar_stats()[0]
+    num_align = M + E + X + I + D
+    if num_align == 0:
+        return 0
+    return 100.0 * ((num_align - NM) / num_align)
+
+
+def compute_start_time(bam_read):
+    try:
+        st = bam_read.get_tag("st")
+    except KeyError:
+        return np.iinfo(np.uint32).max
+
+    if "+" in st:
+        st = st.split("+")[0]
+    elif "-" in st and st.count("-") > 2:
+        st = "-".join(st.split("-")[:3]) + "T" + st.split("T")[1]
+    try:
+        st = datetime.fromisoformat(st)
+    except ValueError:
+        # Handle cases with fractional seconds by padding zeros
+        st_parts = st.split(".")
+        if len(st_parts) < 2:
+            return np.iinfo(np.uint32).max
+        frac_sec = st_parts[1]
+        while len(frac_sec) < 6:
+            frac_sec += "0"
+        st = st_parts[0] + "." + frac_sec
+        st = datetime.fromisoformat(st)
+    return int((st - REF_DT).total_seconds())
+
+
+MAPPING_METRICS = {
+    "percent_identity": READ_METRIC(compute_percent_identity, 0),
+    "start_time": READ_METRIC(compute_start_time, np.iinfo(np.uint32).max),
+}
+
+READ_METRICS = {**SIGNAL_METRICS, **MAPPING_METRICS}
 
 
 ###################
